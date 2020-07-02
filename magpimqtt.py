@@ -41,16 +41,17 @@ Modified    26 Feb 2018
     Buffer position     00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38
 
 '''
-import serial
+import socket
+import sys
 import time
 import array
 import argparse
 
 import paho.mqtt.client as mqtt #import the client1
 
-broker_address="localhost"
+broker_address="192.168.123.22"
 client = mqtt.Client("magnum") #create new instance
-client.username_pw_set("emonpi", password="emonpimqtt2016")
+#client.username_pw_set("emonpi", password="emonpimqtt2016")
 
 try:
     client.connect(broker_address, port=1883) #connect to broker
@@ -66,6 +67,7 @@ def safeDiv(x,y):
 class inverter_proto():
     """definition of inverter packet """
 #    def __init__(self):
+    comm_status = 0
     status_descript = "NA"      #       status descriptive word:
     fault_descript = "NA"       #       fault descriptive word:
     model_descript = "NA"
@@ -919,16 +921,13 @@ def main():
     global serial_port          # access to the global serial port argument:
 
 #    open commuication port:
-    def openPort(serial_port):
+    def openPort(server, port):
         try:
-            mag_port = serial.Serial(port = serial_port,
-#            mag_port = serial.Serial(port = '/dev/ttyUSB0',
-#            mag_port = serial.Serial(port = '/dev/tty.usbmodem621',
-                            baudrate = 19200,
-                            bytesize = 8,
-                            timeout = None)
-            
-            return(mag_port)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            serverAddress =  socket.gethostbyname(server)
+            print(serverAddress)
+            sock.connect((serverAddress, port))
+            return(sock)
         except:
             print('Error: Failed to open commuications port, exiting')
             exit()
@@ -941,10 +940,9 @@ def main():
         serial_buffer   = array.array('i')
 
 #        call to open the communications port and assign handle on success:
-        mag_port = openPort(serial_port)
+        mag_port = openPort(tcp_host, int(tcp_port))
         
-        mag_port.read(100)
-        mag_port.flush()
+        mag_port.recv(100)
       
         sync_locked = 0
         bytes_waiting = 0
@@ -953,14 +951,15 @@ def main():
           sync_check_start = time.time()
 
           try:
-            serial_byte = ord(mag_port.read(1))
+            serial_byte = ord(mag_port.recv(1))
             #print(format(serial_byte, '02x')), #debug
 
           except:
             print
             print("Error: Failed to read communications Port, exiting")
+            inverter.comm_status = 0
             mag_port.close()
-            exit()
+            break
         
           sync_check_stop = time.time()
           sync_locked = sync_check_stop - sync_check_start
@@ -982,9 +981,9 @@ def main():
 
             time.sleep(0.07)
          
-            bytes_waiting = mag_port.inWaiting()
+            bytes_waiting = 64
        
-            serial_buffer = chr(serial_byte) + mag_port.read(bytes_waiting)
+            serial_buffer = chr(serial_byte) + mag_port.recv(bytes_waiting)
 
             if debug_level > 0:
               print("(" + str(bytes_waiting+1) + ")"),
@@ -992,7 +991,7 @@ def main():
               for i in range(0,bytes_waiting+1):
                 print(format(ord(serial_buffer[i]), '02x')),
 
-              print
+            
 
             #Check if we have a remoted connected and decode it, otherwise program fails
             if (len(serial_buffer) > 22):
@@ -1035,7 +1034,7 @@ def main():
                   remote_BMK.decode(serial_buffer)
               
             #decode if an accesory responded 
-            if(bytes_waiting+1 > 43):
+            if(len(serial_buffer)+1 > 43):
               if debug_level > 0:
                 print ("Decoding Accessory"),
 
@@ -1058,7 +1057,7 @@ def main():
                 AGS1.decode(serial_buffer)
 
             if p < 7:
-              serial_byte = ord(mag_port.read(1))
+              serial_byte = ord(mag_port.recv(1))
         #remote_base.decode(serial_buffer)
         inverter.decode(serial_buffer)
 
@@ -1074,6 +1073,7 @@ def main():
         #Publish device versions
         client.publish("inverter/desc", inverter.model_descript)
         client.publish("inverter/rev", inverter.revision)
+        client.publish("inverter/comm_status", inverter.comm_status)
     
         if (RTR.rtr_revision != 0):
           client.publish("inverter/me-rtr-rev",RTR.rtr_revision)
@@ -1230,16 +1230,19 @@ t=time.time()
 #application entry point:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--port", default = "/dev/ttyUSB0", help="commuications port descriptor, e.g /dev/ttyUSB0 or COM1")
+    parser.add_argument("-s", "--server", default = "127.0.0.1", help="RS485 to Ethernet Converter Hostname or IP Address")
+    parser.add_argument("-p", "--port", default = "2056", help="RS485 to Ethernet Converter TCP Port number")
     parser.add_argument("-d", "--debug", default = 0, type=int, choices=[0, 1, 2], help="debug data")
     args = parser.parse_args()
     
-    serial_port = args.port
+    tcp_host = args.server.strip()
+    tcp_port = args.port
     debug_level = args.debug 
 
     print("MagPy Magnum Energy MagnaSine Data Protocol Decoder\n")
     print("Debug level : {0}".format(debug_level))
-    print("serial port : " + serial_port + "\n")
+    print("TCP Host : " + tcp_host + "\n")
+    print("TCP Port : " + tcp_port + "\n")
     
     system_bus_volts = 0    # set as global variable:
     while True:
