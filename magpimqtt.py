@@ -41,6 +41,17 @@ Modified    26 Feb 2018
     Buffer position     00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38
 
 '''
+
+#sys.path.insert(0, "../../../client_libraries/python/")
+#print(sys.path)
+
+
+import sparkplug_b as sparkplug
+import random
+import string
+
+from sparkplug_b import *
+
 import socket
 import sys
 import time
@@ -49,14 +60,114 @@ import argparse
 
 import paho.mqtt.client as mqtt #import the client1
 
-broker_address="192.168.123.22"
+def on_message(client, userdata, msg):
+    print("Message arrived: " + msg.topic)
+    tokens = msg.topic.split("/")
+
+    if tokens[0] == "spBv1.0" and tokens[1] == myGroupId and (tokens[2] == "NCMD" or tokens[2] == "DCMD") and tokens[3] == myNodeName:
+        inboundPayload = sparkplug_b_pb2.Payload()
+        inboundPayload.ParseFromString(msg.payload)
+        for metric in inboundPayload.metrics:
+            if metric.name == "Node Control/Rebirth" or metric.alias == AliasMap.Rebirth:
+                # 'Node Control/Rebirth' is an NCMD used to tell the device/client application to resend
+                # its full NBIRTH and DBIRTH again.  MQTT Engine will send this NCMD to a device/client
+                # application if it receives an NDATA or DDATA with a metric that was not published in the
+                # original NBIRTH or DBIRTH.  This is why the application must send all known metrics in
+                # its original NBIRTH and DBIRTH messages.
+                publishBirth()
+            elif metric.name == "Node Control/Reboot" or metric.alias == AliasMap.Reboot:
+                # 'Node Control/Reboot' is an NCMD used to tell a device/client application to reboot
+                # This can be used for devices that need a full application reset via a soft reboot.
+                # In this case, we fake a full reboot with a republishing of the NBIRTH and DBIRTH
+                # messages.
+                publishBirth()
+        else:
+            print "Unknown command..."
+
+        print "Done publishing"
+######################################################################
+# Publish the BIRTH certificates
+######################################################################
+def publishBirth():
+    publishNodeBirth()
+    publishDeviceBirth()
+######################################################################
+# Publish the NBIRTH certificate
+######################################################################
+def publishNodeBirth():
+    print "Publishing Node Birth"
+
+    # Create the node birth payload
+    payload = sparkplug.getNodeBirthPayload()
+
+    # Set up the Node Controls
+    addMetric(payload, "Node Control/Next Server", AliasMap.Next_Server, MetricDataType.Boolean, False)
+    addMetric(payload, "Node Control/Rebirth", AliasMap.Rebirth, MetricDataType.Boolean, False)
+    addMetric(payload, "Node Control/Reboot", AliasMap.Reboot, MetricDataType.Boolean, False)
+
+
+    # Publish the node birth certificate
+    byteArray = bytearray(payload.SerializeToString())
+    client.publish("spBv1.0/" + myGroupId + "/NBIRTH/" + myNodeName, byteArray, 0, False)
+######################################################################
+
+######################################################################
+# Publish the DBIRTH certificate
+######################################################################
+def publishDeviceBirth():
+    print "Publishing Device Birth"
+
+    # Get the payload
+    payload = sparkplug.getDeviceBirthPayload()
+
+    # Add some device metrics
+    addMetric(payload, "desc", 0, MetricDataType.String, "")
+    addMetric(payload, "rev", 1, MetricDataType.String, "")
+    addMetric(payload, "comm_status", 2, MetricDataType.Int16, 0)
+    addMetric(payload, "mode", 3, MetricDataType.String, "")
+    addMetric(payload, "faults", 4, MetricDataType.String, "")
+    addMetric(payload, "ac/vout", 5, MetricDataType.Double, 0)
+    addMetric(payload, "ac/iin", 6, MetricDataType.Double, 0)
+    addMetric(payload, "ac/iiout", 7, MetricDataType.Double, 0)
+    addMetric(payload, "ac/freq", 8, MetricDataType.Double, 0)
+    addMetric(payload, "ac/power", 9, MetricDataType.Double, 0)
+    addMetric(payload, "dc/vin", 10, MetricDataType.Double, 0)
+    addMetric(payload, "dc/iiout", 11, MetricDataType.Double, 0)
+    addMetric(payload, "dc/power", 12, MetricDataType.Double, 0)
+    addMetric(payload, "thermal/battemp", 13, MetricDataType.Double, 0)
+    addMetric(payload, "thermal/xfmrtemp", 14, MetricDataType.Double, 0)
+    addMetric(payload, "thermal/fettemp", 15, MetricDataType.Double, 0)
+
+
+    # Publish the initial data with the Device BIRTH certificate
+    totalByteArray = bytearray(payload.SerializeToString())
+    client.publish("spBv1.0/" + myGroupId + "/DBIRTH/" + myNodeName + "/" + myDeviceName, totalByteArray, 0, False)
+######################################################################
+
+
+# Application Variables
+serverUrl = "localhost"
+myGroupId = "solar"
+myNodeName = "pi"
+myDeviceName = "inverter"
+publishPeriod = 5000
+
+broker_address="www3.albertaog.ca"
 client = mqtt.Client("magnum") #create new instance
-#client.username_pw_set("emonpi", password="emonpimqtt2016")
+client.username_pw_set("solaruser", password="SuperPa33$")
+client.on_message = on_message
+
+
 
 try:
     client.connect(broker_address, port=1883) #connect to broker
+    publishBirth()
 except:
     print("Broker Connection Failed")
+
+######################################################################
+
+
 
 def safeDiv(x,y):
     try:
@@ -994,7 +1105,7 @@ def main():
             
 
             #Check if we have a remoted connected and decode it, otherwise program fails
-            if (len(serial_buffer) > 22):
+            if (len(serial_buffer) > 42):
                 if (ord(serial_buffer[42]) == 0xa0):
                   if debug_level > 0:
                     print("Remote A0 Packet ")
@@ -1070,45 +1181,33 @@ def main():
 
     #application report via MQTT
     def pubMqtt():
-        #Publish device versions
-        client.publish("inverter/desc", inverter.model_descript)
-        client.publish("inverter/rev", inverter.revision)
-        client.publish("inverter/comm_status", inverter.comm_status)
-    
-        if (RTR.rtr_revision != 0):
-          client.publish("inverter/me-rtr-rev",RTR.rtr_revision)
-        else:
-          client.publish("inverter/me-arc-rev",remote_base.revision)
-        if (BMK.bmk_revision != 0):
-          client.publish("inverter/bmk-rev", BMK.bmk_revision)
-        if (AGS1.ags_revision != 0):
-          client.publish("inverter/ags-rev", remote_A0_agsA1.ags_revision)
-  
+        # Periodically publish some new data
+        payload = sparkplug.getDdataPayload()
         acwatts = int((inverter.volts_ac_out)*(inverter.amps_ac_in-inverter.amps_ac_out)) #assumes symmetric load across phases
-        dcwatts = inverter.volts_dc*inverter.amps_dc
-        eff = round(abs(safeDiv(acwatts, dcwatts)*100), 2) #extra function prevents divide by zero error if power is 0
-        
-        client.publish("inverter/mode",inverter.status_descript)
-        client.publish("inverter/faults",inverter.fault_descript)
-    
-        #AC readings
-        client.publish("inverter/ac/vout", inverter.volts_ac_out)
-        client.publish("inverter/ac/iin", inverter.amps_ac_in)
-        client.publish("inverter/ac/iout", inverter.amps_ac_out)
-        client.publish("inverter/ac/freq", inverter.frequency_ac_out)
-	client.publish("inverter/ac/power", acwatts)        
+        # Add some random data to the inputs
+        addMetric(payload, "desc", 0, MetricDataType.String, str(inverter.model_descript))
+        addMetric(payload, "rev", 1, MetricDataType.String, str(inverter.revision))
+        addMetric(payload, "comm_status", 2, MetricDataType.Int16, int(inverter.comm_status))
+        addMetric(payload, "mode", 3, MetricDataType.String, str(inverter.status_descript))
+        addMetric(payload, "faults", 4, MetricDataType.String, str(inverter.fault_descript))
+        addMetric(payload, "ac/vout", 5, MetricDataType.Double, inverter.volts_ac_out)
+        addMetric(payload, "ac/iin", 6, MetricDataType.Double, inverter.amps_ac_in)
+        addMetric(payload, "ac/iiout", 7, MetricDataType.Double, inverter.amps_ac_out)
+        addMetric(payload, "ac/freq", 8, MetricDataType.Double, inverter.frequency_ac_out)
+        addMetric(payload, "ac/power", 9, MetricDataType.Double, acwatts)
+        addMetric(payload, "dc/vin", 10, MetricDataType.Double, inverter.volts_dc)
+        addMetric(payload, "dc/iiout", 11, MetricDataType.Double, inverter.amps_dc)
+        addMetric(payload, "dc/power", 12, MetricDataType.Double, inverter.volts_dc*inverter.amps_dc)
+        addMetric(payload, "thermal/battemp", 13, MetricDataType.Double, float(inverter.temp_battery))
+        addMetric(payload, "thermal/xfmrtemp", 14, MetricDataType.Double, float(inverter.temp_transformer))
+        addMetric(payload, "thermal/fettemp", 15, MetricDataType.Double, float(inverter.temp_FET))
 
-        #DC readings
-        client.publish("inverter/dc/vin", inverter.volts_dc)
-        client.publish("inverter/dc/iout", inverter.amps_dc)
-        client.publish("inverter/dc/power", inverter.volts_dc*inverter.amps_dc)
-    
-        #Inverter thermal readings
-        client.publish("inverter/thermal/battemp", int(inverter.temp_battery))
-        client.publish("inverter/thermal/xfmrtemp", int(inverter.temp_transformer))
-        client.publish("inverter/thermal/fettemp", int(inverter.temp_FET))
 
-#    application report function:
+        # Publish a message data
+        byteArray = bytearray(payload.SerializeToString())
+        client.publish("spBv1.0/" + myGroupId + "/DDATA/" + myNodeName + "/" + myDeviceName, byteArray, 0, False)
+
+    #    application report function:
     def report_results():
         print("")
         print("Equip List")
